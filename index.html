@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>three-volume-3d</title>
+	<link rel="stylesheet" type="text/css" href="./css/style.css">
+	<style type="text/css">
+		.title{
+			width:1000px;
+		}
+	</style>
+</head>
+<body>
+	<div class="title">SDF Shader</div>
+	<div class="subtitle">WebGL Material<div class="info">Done with three.js</div></div>
+	<script type="module">
+		import * as THREE from './libs/build/three.module.js';
+		import { OrbitControls } from './libs/examples/jsm/controls/OrbitControls.js';
+		import { cubeInCubeVs, cubeInCubeFs, cubeInCubeAnimVs, cubeInCubeAnimFs, cubeHoleVs, cubeHoleFs } from './src/shaders.js';
+		import { cubeOceanVs, cubeOceanFs} from './src/shaderOcean.js';
+		//import { cubeInCubeVs, cubeInCubeFs } from './shadertest.js';
+
+		const title = document.querySelector('.title');
+		const subtitle = document.querySelector('.subtitle');
+		
+		const clock = new THREE.Clock();
+		let camera, scene, renderer, mesh, material, control;
+		let textureCube;
+
+		const initGeometry = () => {
+			const width = 1;
+			const height = 1;
+			const depth = 1;
+			const radius0 = 0.08
+			const smoothness = 8
+			const shape = new THREE.Shape();
+			const eps = 0.00001;
+			const radius = radius0 - eps;
+			shape.absarc(eps, eps, eps, -Math.PI / 2, -Math.PI, true);
+			shape.absarc(eps, height - radius * 2, eps, Math.PI, Math.PI / 2, true);
+			shape.absarc(
+				width - radius * 2,
+				height - radius * 2,
+				eps,
+				Math.PI / 2,
+				0,
+				true
+			);
+
+			shape.absarc(width - radius * 2, eps, eps, 0, -Math.PI / 2, true);
+			const geometry = new THREE.ExtrudeBufferGeometry(shape, {
+				depth: depth - radius0 * 2,
+				bevelEnabled: true,
+				bevelSegments: smoothness * 2,
+				steps: 1,
+				bevelSize: radius,
+				bevelThickness: radius0,
+				curveSegments: smoothness
+			});
+			geometry.center();
+			geometry.computeVertexNormals();
+
+			
+
+		    
+			return geometry;
+		};
+		
+		const initCubeMap = () => {
+			const r = 'https://threejs.org/examples/textures/cube/Bridge2/';
+			const urls = [ r + 'posx.jpg', r + 'negx.jpg',
+			              r + 'posy.jpg', r + 'negy.jpg',
+			              r + 'posz.jpg', r + 'negz.jpg' ];
+
+			textureCube = new THREE.CubeTextureLoader().load( urls );
+			textureCube.encoding = THREE.sRGBEncoding;
+
+			scene.background = textureCube;
+		};
+
+		const initMaterial = () => {
+			initCubeMap();
+			material = new THREE.ShaderMaterial({
+				uniforms:{
+					u_resolution: { type:'v2', value:new THREE.Vector2(window.innerWidth,  window.innerHeight) },
+					u_cameraPosition: { type:'v3', value:new THREE.Vector3() },
+					u_viewMatrix: { type: 'm4', value: new THREE.Matrix4() },
+					u_modelMatrix: { type: 'm4', value: new THREE.Matrix4() },
+					u_modelViewMatrix: { type: 'm4', value: new THREE.Matrix4() },
+					u_projectionMatrix: { type: 'm4', value: new THREE.Matrix4() },
+					u_normalMatrix: { type: 'm3', value: new THREE.Matrix3() },
+					u_matrix: { type: 'm4', value: new THREE.Matrix4() },
+					u_time: { type: 'f', value:0 },
+					u_color: {type: 'v3', value:new THREE.Color(.7, 0.8, 1.)},
+					u_textureCube: { type: "t", value: textureCube },
+					u_textureNoise: { type: "t", value: new THREE.TextureLoader().load('./textures/noise.png') }
+				},
+				vertexShader:cubeHoleVs,
+				fragmentShader:cubeHoleFs,
+				transparent:true,
+				extensions:{
+					derivatives:true,
+				}
+			});
+		}
+
+		const init = async() => {
+			camera = new THREE.PerspectiveCamera(85, window.innerWidth / window.innerHeight, .01, 10);
+			camera.position.set(0, .5, 1.85);
+			scene = new THREE.Scene();
+
+			camera.lookAt(scene.position);
+
+			renderer = new THREE.WebGLRenderer({
+				antialias:true,
+				transparent:true,
+			});
+
+			document.body.appendChild(renderer.domElement);
+
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			initMaterial();
+
+			mesh = new THREE.Mesh(initGeometry(), material);
+			scene.add(mesh);
+			control= new OrbitControls(camera, renderer.domElement);
+
+			title.classList.add('show')
+			subtitle.classList.add('show')
+
+			update();
+		};
+
+		const update = () => {
+			requestAnimationFrame(update);
+			const t = clock.getElapsedTime();
+
+			//mesh.rotateX(.01);
+			//mesh.rotateY(.02);				
+
+			mesh.updateMatrix();
+			mesh.updateMatrixWorld();		
+			camera.updateMatrix();
+			camera.updateMatrixWorld();
+
+			material.uniforms.u_time.value = t;
+			material.uniforms.u_cameraPosition.value.copy(camera.position);
+			material.uniforms.u_viewMatrix.value.copy(camera.matrixWorldInverse);
+			material.uniforms.u_modelMatrix.value.copy(mesh.matrix);
+			material.uniforms.u_modelViewMatrix.value.copy(mesh.modelViewMatrix);
+			material.uniforms.u_normalMatrix.value.getNormalMatrix(mesh.matrixWorld);
+			material.uniforms.u_projectionMatrix.value.copy(camera.projectionMatrix);
+			material.uniforms.u_matrix.value.copy(mesh.matrixWorld);
+
+			renderer.render(scene, camera);
+		};
+
+		init();
+
+	</script>
+</body>
+</html>

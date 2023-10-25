@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>three-volume-3d</title>
+	<style type="text/css">
+		body, html{
+			margin: 0px;
+		}
+	</style>
+</head>
+<body>
+	<script type="module">
+		import * as THREE from '../three.js-131/build/three.module.js';
+		import { cubeInCubeVs, cubeInCubeFs, cubeInCubeAnimVs, cubeInCubeAnimFs, cubeHoleVs, cubeHoleFs } from './shaders.js';
+		import { cubeOceanVs, cubeOceanFs} from './shaderOcean.js';
+		//import { cubeInCubeVs, cubeInCubeFs } from './shadertest.js';
+		import './cannon.js';
+		import {createConvexPolyhedron, createTrimeshFromObject, createTrimeshShape} from './generate_collider.js'
+		import ExtendedMaterial from './ExtendedMaterial.js';
+
+		const NUM = 1;
+		const FLOOR_SIZE = 100;
+        const FLOOR_HEIGHT = -56
+
+		const clock = new THREE.Clock();
+		let camera, scene, renderer, mesh, material;
+		let textureCube;
+
+		let world,  body, sphereBody;
+		let hullmodel, hullbody;
+		let lastCallTime= 0;
+
+		const bodies = [];
+		const visuals = [];
+
+		const initCannon = () => {
+			world = new CANNON.World();
+            world.quatNormalizeSkip = 0;
+            world.quatNormalizeFast = false;
+
+            var solver = new CANNON.GSSolver();
+
+            world.defaultContactMaterial.contactEquationStiffness = 1e9;
+            world.defaultContactMaterial.contactEquationRelaxation = 4;
+
+            solver.iterations = 7;
+            solver.tolerance = 0.1;
+            var split = true;
+
+            if(split)
+                world.solver = new CANNON.SplitSolver(solver);
+            else
+                world.solver = solver;
+
+            world.gravity.set(0,-9.81,0);
+            world.broadphase = new CANNON.NaiveBroadphase();
+
+            // Create a slippery material (friction coefficient = 0.0)
+            const physicsMaterial = new CANNON.Material("slipperyMaterial");
+            const physicsContactMaterial = new CANNON.ContactMaterial(physicsMaterial,
+                                                                        physicsMaterial,
+                                                                        0.0, // friction coefficient
+                                                                        0.3  // restitution
+                                                                        );
+                // We must add the contact materials to the world
+                world.addContactMaterial(physicsContactMaterial);
+
+
+		};
+
+		const initGeometry = () => {
+			const geometry = new THREE.SphereBufferGeometry(.5,32,32);
+
+			geometry.center();
+			geometry.computeVertexNormals();
+
+		    
+			return geometry;
+		};
+		
+		const initCubeMap = () => {
+			const r = 'https://threejs.org/examples/textures/cube/Bridge2/';
+			const urls = [ r + 'posx.jpg', r + 'negx.jpg',
+			              r + 'posy.jpg', r + 'negy.jpg',
+			              r + 'posz.jpg', r + 'negz.jpg' ];
+
+			textureCube = new THREE.CubeTextureLoader().load( urls );
+			textureCube.encoding = THREE.sRGBEncoding;
+		};
+
+		const initMaterial = () => {
+			initCubeMap();
+			const uniforms = [
+				{
+					u_resolution: {
+						type:'v2',
+						value:new THREE.Vector2(innerWidth, innerHeight)
+					}
+				},/*
+				{
+					u_cameraPosition: {
+						type:'v3',
+						value:new THREE.Vector3()
+					}
+				},
+				{
+					u_viewMatrix: {
+						type: 'm4',
+						value: new THREE.Matrix4()
+					}
+				},
+				{
+					u_modelMatrix: {
+						type: 'm4',
+						value: new THREE.Matrix4()
+					}
+				},
+				{
+					u_modelViewMatrix: {
+						type: 'm4',
+						value: new THREE.Matrix4()
+					}
+				},
+				{
+					u_projectionMatrix: {
+						type: 'm4',
+						value: new THREE.Matrix4()
+					}
+				},
+				{
+					u_normalMatrix: {
+						type: 'm3',
+						value: new THREE.Matrix3()
+					}
+				},*/
+				{
+					u_matrix: {
+						type: 'm4',
+						value: new THREE.Matrix4()
+					}
+				},
+				{
+					u_time: {
+						type: 'f',
+						value:0
+					}
+				},
+				{
+					u_color: {
+						type: 'v3',
+						value:new THREE.Color(.7, 0.8, 1.)
+					}
+				},
+				{
+					u_textureCube: {
+						type: "t",
+						value: textureCube
+					}
+				},
+				{
+					u_textureNoise: {
+						type: "t",
+						value: new THREE.TextureLoader().load('./noise.png')
+					}
+				}
+			];
+
+			const hooks = [
+				{
+					needle:'#include <common>',
+					vertex:`
+					varying vec3 vPosition;
+					varying vec3 vWorldPosition;
+					#include <common>
+					`
+				},
+				{
+					needle:'vNormal = normalize( transformedNormal );',
+					vertex:`
+						vNormal = normalize(normalMatrix * normal);
+					`
+				},
+				{
+					needle:'#include <worldpos_vertex>',
+					vertex:`#include <worldpos_vertex>
+					 vWorldPosition = (modelMatrix * vec4(0,0,0, 1.0)).xyz;
+    				vPosition = (modelMatrix * vec4(position, 1.0)).xyz;	
+
+					`
+				},
+				{
+					needle:'#include <common>',
+					fragment:`#include <common>
+				
+  varying vec3 vPosition;
+	varying vec3 vWorldPosition;
+  
+  uniform mat4 u_matrix;		
+ 
+  uniform sampler2D u_textureNoise;
+  uniform samplerCube u_textureCube;
+  uniform vec2 u_resolution;
+  uniform vec3 u_color;
+  uniform float u_time;
+#define LAST_FRAME iChannel0
+#define SKYBOX(v) texture(iChannel1, v).rgb
+#define KEY_SAMPLER iChannel2
+
+// ===============================
+// Generic Helpers/Constants
+// ===============================
+
+#define PI 3.141592653589793
+#define TWOPI 6.283185307179586
+#define HALFPI 1.570796326794896
+#define SQRT2INV 0.7071067811865475
+
+#define POLAR(theta) vec3(cos(theta), 0.0, sin(theta))
+#define SPHERICAL(theta, phi) (sin(phi)*POLAR(theta) + vec3(0.0, cos(phi), 0.0))
+
+// https://www.shadertoy.com/view/lsXGzf (iq: "Input - Keyboard")
+#define KEY_A 65
+#define KEY_S 83
+#define KEY_D 68
+#define KEY_F 70
+
+// Same as built-in 'refract' (cf. link) but replaces the case which would
+// normally result in 0 with a reflection (for total internal reflection)
+// https://www.khronos.org/registry/OpenGL-Refpages/gl4/html/refract.xhtml
+vec3 refractFix(vec3 I, vec3 N, float eta) {
+    float k = 1.0 - eta * eta * (1.0 - dot(N, I) * dot(N, I));
+    return k < 0.0
+        ? reflect(I, N) // <- 'refract' returns 0 here
+    	: eta * I - (eta * dot(N, I) + sqrt(k)) * N;
+}
+
+vec4 blendOnto(vec4 cFront, vec4 cBehind) {
+    return cFront + (1.0 - cFront.a)*cBehind;
+}
+
+vec4 blendOnto(vec4 cFront, vec3 cBehind) {
+    return cFront + (1.0 - cFront.a)*vec4(cBehind, 1.0);
+}
+
+// ===============================
+// Quaternion helpers
+// (Unit quaternions: w+xi+yj+zk)
+// ===============================
+
+#define QID vec4(0.0, 0.0, 0.0, 1.0)
+
+vec4 slerp(vec4 a, vec4 b, float t) {
+    float d = dot(a, b);
+    vec4 a2 = a;
+
+    if (d < 0.0) {
+        d = -d;
+        a2 = -a;
+    }
+    if (d > 0.999) {
+        return normalize(mix(a2, b, t));
+    }
+
+    float theta = acos(d);
+    return (sin((1.-t)*theta)*a2 + sin(t*theta)*b) / sin(theta);
+}
+
+vec4 qMul(vec4 a, vec4 b) {
+    return vec4(
+        a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+        a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+        a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+        a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z
+    );
+}
+
+vec4 qConj(vec4 q) {
+    return vec4(-q.xyz, q.w);
+}
+
+vec4 qRot(vec3 nvAxis, float angle) {
+    return vec4(nvAxis*sin(angle*0.5), cos(angle*0.5));
+}
+
+mat3 qToMat(vec4 q) {
+    float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
+    float xx = q.x*q.x, xy = q.x*q.y, xz = q.x*q.z;
+    float yy = q.y*q.y, yz = q.y*q.z, zz = q.z*q.z;
+    return mat3(
+        1. - 2.*(yy + zz),
+             2.*(xy + wz),
+             2.*(xz - wy),
+
+             2.*(xy - wz),
+        1. - 2.*(xx + zz),
+             2.*(yz + wx),
+
+             2.*(xz + wy),
+             2.*(yz - wx),
+        1. - 2.*(xx + yy)
+    );
+}
+
+// ===============================
+// Reading/writing state
+// ===============================
+
+struct state {
+    vec3 p; // Pendulum pivot
+    vec3 q; // Accelerate p toward this point
+    vec3 v; // Pendulum "bob" (relative to pivot)
+    vec3 L; // Angular momentum
+    vec4 pr; // Object rotation (unit quaternion)
+};
+
+state readState() {
+    state s = state(
+        vec3(0.0),
+        vec3(0.0),
+        vec3(0.0, -cos(0.25*PI), sin(0.25*PI)),
+        vec3(0.0, 0.5, 0.0),
+        QID
+    );
+    if (iFrame > 0) {
+        s.p = texelFetch(LAST_FRAME, ivec2(0, 0), 0).xyz;
+        s.q = texelFetch(LAST_FRAME, ivec2(1, 0), 0).xyz;
+        s.v = texelFetch(LAST_FRAME, ivec2(2, 0), 0).xyz;
+        s.L = texelFetch(LAST_FRAME, ivec2(3, 0), 0).xyz;
+        s.pr = texelFetch(LAST_FRAME, ivec2(4, 0), 0);
+    }
+    return s;
+}
+
+void writeState(in state s, in vec2 fragCoord, inout vec4 fragColor) {
+    if (abs(fragCoord.y - 0.0-0.5) < 0.5) {
+        if (abs(fragCoord.x - 0.0-0.5) < 0.5) {
+            fragColor = vec4(s.p, 1.0);
+        } else if (abs(fragCoord.x - 1.0-0.5) < 0.5) {
+            fragColor = vec4(s.q, 1.0);
+        } else if (abs(fragCoord.x - 2.0-0.5) < 0.5) {
+            fragColor = vec4(s.v, 1.0);
+        } else if (abs(fragCoord.x - 3.0-0.5) < 0.5) {
+            fragColor = vec4(s.L, 1.0);
+        } else if (abs(fragCoord.x - 4.0-0.5) < 0.5) {
+            fragColor = s.pr;
+        }
+    }
+}
+
+// ===============================
+// Camera setup
+// ===============================
+
+#define RES iResolution
+#define TAN_HALF_FOVY 0.5773502691896257
+
+vec3 nvCamDirFromClip(vec3 iResolution, vec3 nvFw, vec2 clip) {
+    vec3 nvRt = normalize(cross(nvFw, vec3(0.,1.,0.)));
+    vec3 nvUp = cross(nvRt, nvFw);
+    return normalize(TAN_HALF_FOVY*(clip.x*(RES.x/RES.y)*nvRt + clip.y*nvUp) + nvFw);
+}
+
+void getCamera(in state s, in vec2 uv, out vec3 camPos, out vec3 nvCamDir) {
+    vec2 mouseAng = vec2(HALFPI*0.75, PI*0.45) + 0.2*vec2(cos(0.5*iTime),sin(0.5*iTime));
+    camPos = vec3(0.0, 2.0, 0.0) + 5.0 * SPHERICAL(mouseAng.x, mouseAng.y);
+
+    vec3 lookTarget = mix(vec3(0.0), s.p, 0.05);
+    vec3 nvCamFw = normalize(lookTarget - camPos);
+
+    nvCamDir = nvCamDirFromClip(iResolution, nvCamFw, uv*2. - 1.);
+}
+
+// ===============================
+// Physics, reading/writing state
+// ===============================
+
+void updateState(inout state s) {
+
+    // p (object displacement) gets "lerped" towards q
+    if (iMouse.z > 0.5) {
+        vec2 uvMouse = iMouse.xy / iResolution.xy;
+        vec3 camPos;
+        vec3 nvCamDir;
+        getCamera(s, uvMouse, camPos, nvCamDir);
+
+        float t = -camPos.y/nvCamDir.y;
+        if (t > 0.0 && t < 50.0) {
+            vec3 center = vec3(0.0);
+            s.q = camPos + t*nvCamDir;
+            float qToCenter = distance(center, s.q);
+            if (qToCenter > 5.0) {
+                s.q = mix(center, s.q, 5.0/qToCenter);
+            }
+        }
+    }
+
+    // pr (object rotation unit quaternion) gets "slerped" towards qr
+    float tmod = mod(iTime+6.0, 9.0);
+    vec4 qr = (
+        tmod < 3.0 ? qRot(vec3( SQRT2INV, 0.0, SQRT2INV), 0.75*PI) :
+        tmod < 6.0 ? qRot(vec3(-SQRT2INV, 0.0, SQRT2INV), 0.5*PI) :
+        QID
+    );
+
+    // apply lerp p -> q and slerp pr -> qr
+    s.p += 0.25*(s.q - s.p);
+    s.pr = normalize(slerp(s.pr, qr, 0.075));
+
+    // object acceleration
+    vec3 a = -0.25*(s.q - s.p) + vec3(0.0, -1.0, 0.0);
+    mat3 prMatInv = qToMat(qConj(s.pr));
+    a = prMatInv*a;
+
+    // hand-wavy torque and angular momentum
+    vec3 T = cross(s.v, a);
+    s.L = 0.96*s.L + 0.2*T;
+
+    // hand-wavy angular velocity applied from torque
+    vec3 w = s.L;
+    float ang = 0.25*length(w);
+    if (ang > 0.0001) {
+        mat3 m = qToMat(qRot(normalize(w), ang));
+        s.v = normalize(m*s.v);
+    }
+}
+
+// ===============================
+// Geometry definitions
+// ===============================
+
+#define BOUNDING_SPHERE_RADIUS 4.0
+#define GLASS_THICKNESS 0.15
+
+float sdfPlane(vec3 planePoint, vec3 nvPlaneN, vec3 p) {
+    return dot(p - planePoint, nvPlaneN);
+}
+
+float sdfInterval(float a, float b, float x) {
+    return abs(x - 0.5*(a+b)) - 0.5*(b-a);
+}
+
+// From https://iquilezles.org/www/articles/distfunctions/distfunctions.htm
+float opSubtraction( float d1, float d2 ) { return max(-d1,d2); }
+float opSmoothSubtraction( float d1, float d2, float k ) {
+    float h = clamp( 0.5 - 0.5*(d2+d1)/k, 0.0, 1.0 );
+    return mix( d2, -d1, h ) + k*h*(1.0-h);
+}
+
+float displacement(vec3 p){
+    return sin(p.x)*sin(p.y)*sin(p.z);
+}
+
+float opDisplace(vec3 p){
+    vec3 offset = .4*iTime * normalize(vec3(-.1, -.1, 0.1));
+    return displacement(.8*(p+offset));
+}
+
+
+float getDistSphere(in vec3 p,in float r) 
+{
+    
+    vec4 s = vec4(0, 0, 0, r);
+    
+    float sphereDist = length(p - s.xyz) - s.w;    
+    return sphereDist;
+}
+
+
+float sdfContainer(vec3 p, state s) {
+    vec3 d = abs(p - s.p);
+    vec3 d2 = d*d;
+
+    //p2.y += dist;
+    //float sdBase = getDistSphere(p2, .001) ;// + dist;//pow(dot(d2,d2), 0.25) - 2.0;
+
+    float sdInner = getDistSphere(p, 1.75);//length(d.xz) - 0.6;
+
+    return sdInner;//opSmoothSubtraction(sdBase, sdInner, 0.05);
+}
+
+float sdfWater(vec3 p, state s) {
+    float dglass = sdfContainer(p, s);
+    
+    float height = p.y+0.06;
+    // Displace the surface for larger waves
+    // Add more displacement lower down
+    float strength = mix(0.02, 0.6, smoothstep(-0.6, -1.5, height));
+    /*if(height < -1.){
+        // No displacement at the very bottom
+        strength = mix(strength, 0.0, smoothstep(-1.5, -1.62, height));
+    }*/
+    float dist =  5.5 * (opDisplace(p ) * s.L.x);
+    
+    
+    float depth = -dist;///-0.025; // Can add e.g. ripples to the surface here
+
+    
+    float dsurf = sdfPlane(s.p + depth*s.v, -s.v, p);
+    return opSubtraction(opSmoothSubtraction(dsurf, dglass, 0.05), dglass);
+}
+
+float sdfGlass(vec3 p, state s) {
+    float etchDepth = 0.0; // Can sample from e.g. cubemap here for some texture
+    return sdfInterval(0.0, GLASS_THICKNESS - etchDepth, sdfContainer(p, s));
+}
+
+#define SDF_N_EPS 0.005
+#define SDF_NORMAL(sdfFn, p, s) \
+    normalize(vec3( \
+        sdfFn( p+vec3(SDF_N_EPS,0.0,0.0), s ) - sdfFn( p-vec3(SDF_N_EPS,0.0,0.0), s ), \
+        sdfFn( p+vec3(0.0,SDF_N_EPS,0.0), s ) - sdfFn( p-vec3(0.0,SDF_N_EPS,0.0), s ), \
+        sdfFn( p+vec3(0.0,0.0,SDF_N_EPS), s ) - sdfFn( p-vec3(0.0,0.0,SDF_N_EPS), s )  \
+    ))
+
+// ===============================
+// Marching, lighting/materials
+// ===============================
+
+#define SDF_EPS 0.01
+#define DSTEP_ADJUST_EPS 0.02
+#define STEPS 60
+
+#define LIGHT_COLOR vec3(.8)
+
+#define GLASS_COLOR vec3(0.01, 0.0, 0.4)
+#define GLASS_OPACITY 0.3
+#define WATER_COLOR vec3(.1, .1, .1)
+#define WATER_OPACITY 0.3
+
+#define IR_AIR 1.0
+#define IR_GLASS 1.5
+#define IR_WATER 1.333
+
+// Enums
+#define SUBSTANCE_AIR 0
+#define SUBSTANCE_GLASS 1
+#define SUBSTANCE_WATER 2
+
+vec4 computeSpecular(
+    in float specularCoefficient,
+    in float specularExponent,
+    in vec3 nvNormal,
+    in vec3 nvFragToLight,
+    in vec3 nvFragToCam
+){
+    vec3 blinnH = normalize(nvFragToLight + nvFragToCam);
+    float valSpecular = pow(max(0.0, dot(nvNormal, blinnH)), specularExponent);
+    valSpecular *= specularCoefficient;
+
+    return valSpecular*vec4(LIGHT_COLOR, 1.0);
+}
+
+void march(in state s, in vec3 pRay, in vec3 nvRayIn, out vec4 color, out vec3 nvRayOut)
+{
+    bool skipOpacity = texelFetch(KEY_SAMPLER, ivec2(KEY_A,0), 0).x > 0.5;
+    bool skipRefraction = texelFetch(KEY_SAMPLER, ivec2(KEY_S,0), 0).x > 0.5;
+    bool debugSteps = texelFetch(KEY_SAMPLER, ivec2(KEY_D,0), 0).x > 0.5;
+    bool debugNormal = texelFetch(KEY_SAMPLER, ivec2(KEY_F,0), 0).x > 0.5;
+
+    // Light (in world coordinates)
+    vec3 pLightO = pRay + vec3(0.0, 10.0, 0.0);
+
+    // Light and camera (in object coordinates)
+    mat3 prMatInv = qToMat(qConj(s.pr));
+    vec3 pCam = prMatInv*(pRay - s.p) + s.p;
+    vec3 pLight = prMatInv*(pLightO - s.p) + s.p;
+
+    // Ray while marching (in object coordinates)
+    vec3 pCur = pCam;
+    vec3 nvRayCur = prMatInv*nvRayIn;
+
+    color = vec4(0.0);
+    int curSubstance = SUBSTANCE_AIR;
+
+    int i=0;
+    for (; i<STEPS; i++) {
+
+        // Quick exits
+        // ----------------
+        vec3 centerToCur = pCur - s.p;
+        if (
+            (length(centerToCur) > BOUNDING_SPHERE_RADIUS) &&
+            (dot(nvRayCur, centerToCur) > 0.0)
+        ) { break; }
+
+        if (color.a > 0.95) { break; }
+		// ----------------
+
+        float sdGlass = sdfGlass(pCur, s);
+        float sdWater = sdfWater(pCur, s);
+        vec3 dpStep = abs(min(sdGlass, sdWater))*nvRayCur;
+
+        vec3 nvGlass = SDF_NORMAL(sdfGlass, pCur, s);
+        vec3 nvWater = SDF_NORMAL(sdfWater, pCur, s);
+
+        if (curSubstance == SUBSTANCE_AIR) {
+
+            if (sdGlass < SDF_EPS && dot(nvGlass,nvRayCur) < 0.0) {
+
+                curSubstance = SUBSTANCE_GLASS;
+
+                vec4 sColor = computeSpecular(
+                    0.8, 120.0, nvGlass, normalize(pLight-pCur), normalize(pCam-pCur)
+                );
+                color = blendOnto(color, sColor);
+
+                // Schlick approximation
+                float cosHitAngle = clamp(dot(nvGlass, -nvRayCur), 0.0, 1.0);
+                float r0 = pow((IR_GLASS-IR_AIR)/(IR_GLASS+IR_AIR), 2.0);
+                float valRefl = mix(r0, 1.0, pow(clamp(1.0 - cosHitAngle, 0.0, 1.0), 3.0)); // Modified exponent 5 -> 3
+
+                vec3 nvRefl = reflect(nvRayCur, nvGlass);
+                color = blendOnto(color, valRefl*vec4(SKYBOX(nvRefl), 1.0));
+
+                dpStep = sdGlass*nvRayCur;
+                dpStep += -DSTEP_ADJUST_EPS*nvGlass;
+                if (!skipRefraction) {
+                    nvRayCur = refractFix(nvRayCur, nvGlass, IR_AIR/IR_GLASS);
+                }
+
+            } else if (sdWater < SDF_EPS && dot(nvWater,nvRayCur) < 0.0) {
+
+                curSubstance = SUBSTANCE_WATER;
+
+                vec4 sColor = computeSpecular(
+                    1.0, 60.0, nvWater, normalize(pLight-pCur), normalize(pCam-pCur)
+                );
+                color = blendOnto(color, sColor);
+
+                // Schlick approximation
+                float cosHitAngle = clamp(dot(nvWater, -nvRayCur), 0.0, 1.0);
+                float r0 = pow((IR_WATER-IR_AIR)/(IR_WATER+IR_AIR), 2.0);
+                float valRefl = mix(r0, 1.0, pow(clamp(1.0 - cosHitAngle, 0.0, 1.0), 5.0));
+
+                vec3 nvRefl = reflect(nvRayCur, nvWater);
+                color = blendOnto(color, valRefl*vec4(SKYBOX(nvRefl), 1.0));
+
+                dpStep = sdWater*nvRayCur;
+                dpStep += -DSTEP_ADJUST_EPS*nvWater;
+                if (!skipRefraction) {
+                    nvRayCur = refractFix(nvRayCur, nvWater, IR_AIR/IR_WATER);
+                }
+
+            }
+
+        } else if (curSubstance == SUBSTANCE_GLASS) {
+
+            float sdGlassInv = -sdGlass;
+            vec3 nvGlassInv = -nvGlass;
+
+            dpStep = abs(sdGlassInv)*nvRayCur;
+
+            if (!skipOpacity) {
+                color = blendOnto(color, clamp(GLASS_OPACITY*sdGlassInv,0.0,1.0)*vec4(GLASS_COLOR, 1.0));
+            }
+
+            if (sdGlassInv < SDF_EPS && dot(nvGlassInv,nvRayCur) < 0.0) {
+
+                curSubstance = SUBSTANCE_AIR;
+
+                dpStep = sdGlassInv*nvRayCur;
+                dpStep += -DSTEP_ADJUST_EPS*nvGlassInv;
+                if (!skipRefraction) {
+                    nvRayCur = refractFix(nvRayCur, nvGlassInv, IR_GLASS/IR_AIR);
+                }
+
+            }
+
+        } else if (curSubstance == SUBSTANCE_WATER) {
+
+            float sdWaterInv = -sdWater;
+            vec3 nvWaterInv = -nvWater;
+
+            dpStep = abs(sdWaterInv)*nvRayCur;
+
+            if (!skipOpacity) {
+                color = blendOnto(color, clamp(WATER_OPACITY*sdWaterInv,0.0,1.0)*vec4(WATER_COLOR, 1.0));
+            }
+
+            if (sdWaterInv < SDF_EPS && dot(nvWaterInv,nvRayCur) < 0.0) {
+
+                curSubstance = SUBSTANCE_AIR;
+
+                dpStep = sdWaterInv*nvRayCur;
+                dpStep += -DSTEP_ADJUST_EPS*nvWaterInv;
+                if (!skipRefraction) {
+                    nvRayCur = refractFix(nvRayCur, nvWaterInv, IR_WATER/IR_AIR);
+                }
+
+            }
+
+        }
+
+        pCur += dpStep;
+
+    }
+
+    // Convert ray direction from object to world coordinates
+    nvRayOut = qToMat(s.pr)*nvRayCur;
+
+    if (debugSteps) {
+        color = vec4( vec3(float(i)/float(STEPS)), 1.0 );
+    } else if (debugNormal) {
+        color = vec4( 0.5 + 0.5*nvRayOut, 1.0 );
+    }
+}
+
+					`	
+				},
+				{
+					needle:'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
+					fragment:`Camera cam = getCamera((vec4(vPosition, 1.)).xyz, normalize(vPosition - cameraPosition), 1.4);
+
+				    	//vec3 nor = normalize(vNormal);
+				    
+					`
+				}
+			];
+
+			const baseMaterial = new THREE.MeshStandardMaterial({
+				transparent: false,
+			});
+
+			material = ExtendedMaterial(renderer, baseMaterial, uniforms, hooks,true);
+		}
+
+		const addBodyAndVisual = (body, mesh) => {
+
+			world.add(body);
+
+			bodies.push(body);
+	        visuals.push(mesh);
+	        scene.add(mesh);
+
+	        body.visualref = mesh;
+	        body.visualref.visualId = bodies.length - 1;
+		};
+
+		const init = async() => {
+
+			camera = new THREE.PerspectiveCamera(85, window.innerWidth / window.innerHeight, .01, 10);
+			camera.position.set(0, .5, 3.85);
+			scene = new THREE.Scene();
+
+			camera.lookAt(scene.position);
+
+			renderer = new THREE.WebGLRenderer({
+				antialias:true,
+				transparent:true,
+			});
+
+			//renderer.outputEncoding = THREE.sRGBEncoding;
+        	renderer.shadowMap.enabled = true;
+        	renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        	//renderer.physicallyCorrectLights = true;
+
+			document.body.appendChild(renderer.domElement);
+
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			initMaterial();
+
+			scene.add(new THREE.AmbientLight(0x333333));
+			const light = new THREE.DirectionalLight( 0xffffff, 1.75 );
+            var d = 200;
+
+            light.position.set( d, d, d );
+
+            light.castShadow = true;
+            //light.shadowCameraVisible = true;
+
+            light.shadow.mapSize.width = 1024;
+            light.shadow.mapSize.height = 1024;
+
+            light.shadow.camera.left = -d;
+            light.shadow.camera.right = d;
+            light.shadow.camera.top = d;
+            light.shadow.camera.bottom = -d;
+
+            light.shadow.camera.far = 3*d;
+            light.shadow.camera.near = 2;
+            
+            scene.add( light );
+			mesh = new THREE.Mesh(initGeometry(), material);
+			//scene.add(mesh);
+			mesh.castShadow = true;
+            mesh.receiveShadow = true;
+			initCannon();
+
+			let hullShape = createTrimeshShape(mesh.geometry);
+
+			const slipperyContact = new CANNON.Material();
+			slipperyContact.friction = 0.1;
+			const halfExtents = new CANNON.Vec3(.5,.5,.5);
+            const boxShape = new CANNON.Box(halfExtents);
+
+			body = new CANNON.Body({
+	            mass: 1,
+	            position: new CANNON.Vec3(0,2,0),
+	            //quaternion:
+	            material:slipperyContact,
+	            shape:hullShape,
+	            linearDamping:0.9,
+	            restitution:.9
+	        });
+
+			//addBodyAndVisual(body, mesh);
+
+	        // Create a plane
+			const groundBody = new CANNON.Body({
+			    mass: 0, // mass == 0 makes the body static
+			    position: new CANNON.Vec3(0,0,-5),
+			});
+			
+			var groundShape = new CANNON.Plane();
+            //var groundBody = new CANNON.Body({ mass: 0 });
+            groundBody.addShape(groundShape);
+            groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1,0,0),-Math.PI/2);
+            //world.addBody(groundBody);
+			//world.addBody(groundBody);
+
+			const pgeometry = new THREE.PlaneGeometry( 30, 30, 150, 150 );
+           //pgeometry.applyMatrix( new THREE.Matrix4().makeRotationX( - Math.PI / 2 ) );
+
+            const pmaterial = new THREE.MeshStandardMaterial( {
+            	color: 0x333333,
+            	//side:THREE.DoubleSide,
+            	//wireframe:true
+            } );
+
+            const pmesh = new THREE.Mesh( pgeometry, pmaterial );
+            addBodyAndVisual(groundBody, pmesh);
+
+            pmesh.castShadow = true;
+            pmesh.receiveShadow = true;
+
+            scene.add( pmesh );
+
+
+            const mass = 5, radius = .3;
+            const sphereShape = new CANNON.Sphere(radius);
+            const sphereBody = new CANNON.Body({
+            	mass: mass,
+            	position: new CANNON.Vec3(.1,1,-.1), });
+            sphereBody.addShape(sphereShape);
+            //sphereBody.position.set(0,5,0);
+            sphereBody.linearDamping = 0.9;
+            //world.addBody(sphereBody);
+            const ballGeometry = new THREE.SphereGeometry(sphereShape.radius, 32, 32);
+            const ballMesh = new THREE.Mesh( ballGeometry, pmaterial );
+            addBodyAndVisual(sphereBody, ballMesh)
+            ballMesh.castShadow = true;
+            ballMesh.receiveShadow = true;
+			update();
+		};
+
+		const updateVisuals = () => {
+	    	var N = bodies.length;
+
+	        // Read position data into visuals
+	        for(var i=0; i<N; i++){
+	            var b = bodies[i], visual = visuals[i];
+	            visual.position.copy(b.position);	       
+	            visual.quaternion.copy(b.quaternion);
+	           
+	        }
+	    };
+
+		const updatePhysics = () => {
+			const timeStep = 1 / 60;
+	        const now = Date.now() / 1000;
+
+	        if(!lastCallTime){
+	            world.step(timeStep);
+	            lastCallTime = now;
+	            return;
+	        }
+
+	        const timeSinceLastCall = now - lastCallTime;
+
+	        world.step(timeStep, timeSinceLastCall, 3);
+
+	        lastCallTime = now;
+		};
+
+		const update = () => {
+			requestAnimationFrame(update);
+			const t = clock.getElapsedTime();
+
+			//mesh.rotateX(.01);
+			//mesh.rotateY(.02);				
+			updatePhysics();
+			updateVisuals();
+
+			//mesh.updateMatrix();
+			//mesh.updateMatrixWorld();	
+			//camera.lookAt(mesh);
+			//camera.updateMatrix();
+			//camera.updateMatrixWorld();
+
+			if(material.uniforms){
+				material.uniforms.u_time.value = t;
+				material.uniforms.u_matrix.value.copy(mesh.matrixWorld);
+			}
+			
+
+			renderer.render(scene, camera);
+		};
+
+		init();
+
+	</script>
+</body>
+</html>
